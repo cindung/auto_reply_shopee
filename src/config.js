@@ -28,11 +28,11 @@ const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS) || 5000;
 const REASSERT_FILTER_MS = parseInt(process.env.REASSERT_FILTER_MS) || 60000;
 
 // ================== SCROLL ==================
-const SCROLL_DOWN_STEPS = parseInt(process.env.SCROLL_DOWN_STEPS) || 2;
-const SCROLL_DOWN_PIXELS = 1200;
+const SCROLL_DOWN_STEPS = parseInt(process.env.SCROLL_DOWN_STEPS) || 4;
+const SCROLL_DOWN_PIXELS = 600;
 const SCROLL_UP_PIXELS = 2000;
 const SCROLL_TOP_PASSES = 6;
-const SCROLL_WAIT_MS = 350;
+const SCROLL_WAIT_MS = 400;
 
 // ================== LOG FORMAT ==================
 const MAX_MSG_LENGTH = parseInt(process.env.MAX_MSG_LENGTH) || 25;

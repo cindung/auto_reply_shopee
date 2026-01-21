@@ -122,24 +122,52 @@ function printLogHeader() {
     console.log("");
     console.log(`${colors.bright}📺 Debug Log${colors.reset}                    [${getCounterString()}]`);
     console.log("");
-    console.log(`${colors.dim}TIME       STORE            USERNAME              MESSAGE                 STATUS${colors.reset}`);
+    console.log(`${colors.dim}DATE         TIME        STORE            USERNAME           MESSAGE                 STATUS${colors.reset}`);
     console.log("");
 }
 
-// ================== MAIN LOG FUNCTION ==================
-function log(store, username, message, status, statusType = "success") {
-    const time = getTimeString();
+// ================== UNIFIED LOG FORMAT ==================
+// Format: DATE  TIME  STORE  USERNAME  MESSAGE  STATUS
+const COL_WIDTH = {
+    DATE: 12,      // YYYY-MM-DD
+    TIME: 11,      // [HH:MM:SS]
+    STORE: 16,     // 🟢 Multi Zone
+    USERNAME: 18,  // buyer name
+    MESSAGE: 24,   // message preview
+    STATUS: 12     // status text
+};
+
+function getDateString() {
+    return new Date().toISOString().slice(0, 10);
+}
+
+function logRow(store, { username = "-", message = "-", status = "-", statusColor = null } = {}) {
+    const date = getDateString();
+    const time = `[${getTimeString()}]`;
     const storeLabel = `${store.emoji} ${store.name}`;
     const storeColor = storeColors[store.emoji] || colors.white;
 
-    // Truncate and pad
-    const usernamePadded = padEnd(truncate(username || "-", config.MAX_USERNAME_LENGTH), config.MAX_USERNAME_LENGTH);
-    const messageTruncated = message ? `"${truncate(message, config.MAX_MSG_LENGTH)}"` : "-";
-    const messagePadded = padEnd(messageTruncated, config.MAX_MSG_LENGTH + 2);
+    // Format each column
+    const dateCol = padEnd(date, COL_WIDTH.DATE);
+    const timeCol = padEnd(time, COL_WIDTH.TIME);
+    const storeCol = padEnd(storeLabel, COL_WIDTH.STORE);
+    const userCol = padEnd(truncate(username, COL_WIDTH.USERNAME - 2), COL_WIDTH.USERNAME);
+    const msgCol = padEnd(message !== "-" ? truncate(message, COL_WIDTH.MESSAGE - 2) : "-", COL_WIDTH.MESSAGE);
+    const statCol = status;
 
-    // Status color
+    // Apply colors
+    const coloredStatus = statusColor ? `${statusColor}${statCol}${colors.reset}` : statCol;
+
+    const line = `${dateCol} ${timeCol} ${storeColor}${storeCol}${colors.reset} ${userCol} ${msgCol} ${coloredStatus}`;
+    console.log(line);
+    writeToLogFile(line);
+}
+
+// Legacy log function (untuk kompatibilitas)
+function log(store, username, message, status, statusType = "success") {
     let statusColor = colors.white;
-    let statusIcon = "○";
+    let statusIcon = "✓";
+
     switch (statusType) {
         case "success":
             statusColor = colors.green;
@@ -156,16 +184,14 @@ function log(store, username, message, status, statusType = "success") {
             statusIcon = "⚠";
             incrementCounter(store.id, "errors");
             break;
-        case "scan":
-            statusColor = colors.white;
-            statusIcon = "○";
-            break;
     }
 
-    const line = `${time}   ${storeColor}${padEnd(storeLabel, 16)}${colors.reset} ${usernamePadded}   ${messagePadded}   ${statusColor}${statusIcon} ${status}${colors.reset}`;
-
-    console.log(line);
-    writeToLogFile(line);
+    logRow(store, {
+        username: username || "-",
+        message: message || "-",
+        status: `${statusIcon} ${status}`,
+        statusColor
+    });
 }
 
 // ================== STATUS LOGS ==================
@@ -182,13 +208,20 @@ function logWaitingLogin(stores) {
 }
 
 function logLoginSuccess(store) {
-    console.log(`   ${store.emoji} ${padEnd(store.name, 12)} │ ${colors.green}✅ Login berhasil!${colors.reset}`);
+    logRow(store, {
+        status: `${colors.green}✅ Login${colors.reset}`
+    });
 }
 
 function logInfo(store, message) {
-    const time = getTimeString();
-    const storeLabel = store ? `${store.emoji} ${store.name}` : "SYSTEM";
-    console.log(`${colors.dim}[${time}] ${storeLabel} │ ${message}${colors.reset}`);
+    if (!store) {
+        console.log(`${colors.dim}[${getTimeString()}] SYSTEM │ ${message}${colors.reset}`);
+        return;
+    }
+    logRow(store, {
+        message: message,
+        status: "-"
+    });
 }
 
 function logError(store, message) {
@@ -196,6 +229,37 @@ function logError(store, message) {
     const storeLabel = store ? `${store.emoji} ${store.name}` : "SYSTEM";
     console.log(`${colors.red}[${time}] ${storeLabel} │ ⚠ ${message}${colors.reset}`);
     writeToLogFile(`[${time}] ${storeLabel} │ ERROR: ${message}`);
+}
+
+// ================== STATUS BAR LOG ==================
+const STATUS_COLORS = {
+    FILTER: colors.cyan,
+    SCAN: colors.yellow,
+    REPLY: colors.green,
+    SKIP: colors.gray,
+    ERROR: colors.red,
+};
+
+function logStatus(store, status, detail) {
+    const colorFn = STATUS_COLORS[status] || colors.white;
+
+    // Parse detail untuk extract username jika ada
+    // Format: "username │ message" atau hanya "message"
+    let username = "-";
+    let message = "-";
+
+    if (detail.includes("│")) {
+        const parts = detail.split("│").map(s => s.trim());
+        username = parts[0] || "-";
+        message = parts[1] ? parts[1].replace(/[✓"]/g, '').trim() : "-";
+    }
+
+    logRow(store, {
+        username: username,
+        message: message,
+        status: `${status} ✓`,
+        statusColor: colorFn
+    });
 }
 
 // ================== SHUTDOWN ==================
@@ -212,10 +276,12 @@ module.exports = {
     printProgress,
     printLogHeader,
     log,
+    logRow,
     logWaitingLogin,
     logLoginSuccess,
     logInfo,
     logError,
+    logStatus,
     printShutdown,
     getCounterString,
     initCounter,

@@ -5,6 +5,14 @@ const selectors = require("./selectors");
 const logger = require("./logger");
 const utils = require("./utils");
 
+// ================== TRACK STATUS (untuk log tidak berulang) ==================
+const filterStatus = {
+    semuaChatClicked: false,
+    semuaPembeliExpanded: false,
+    hadExpandError: false  // Track jika pernah error expand
+};
+const skipLoggedSet = new Set();
+
 // ================== NAVIGATION ==================
 async function robustGoto(page, url) {
     try {
@@ -78,7 +86,6 @@ async function clickFilter(page, filterText, store, { retries = 4 } = {}) {
             if ((await byText.count()) > 0) {
                 await safeClick(byText);
                 await page.locator(selectors.CONVERSATION_LIST).first().waitFor({ timeout: 10_000 });
-                logger.logInfo(store, `Klik '${filterText}' ✓`);
                 return true;
             }
 
@@ -86,7 +93,6 @@ async function clickFilter(page, filterText, store, { retries = 4 } = {}) {
             const byRole = page.getByRole("button", { name: new RegExp(filterText, "i") }).first();
             if ((await byRole.count()) > 0) {
                 await safeClick(byRole);
-                logger.logInfo(store, `Klik '${filterText}' (role) ✓`);
                 return true;
             }
 
@@ -95,13 +101,12 @@ async function clickFilter(page, filterText, store, { retries = 4 } = {}) {
             const contains = nav.locator("div:visible", { hasText: filterText }).first();
             if ((await contains.count()) > 0) {
                 await safeClick(contains);
-                logger.logInfo(store, `Klik '${filterText}' (fallback) ✓`);
                 return true;
             }
 
             throw new Error(`Elemen '${filterText}' belum ditemukan.`);
         } catch (e) {
-            logger.logInfo(store, `Gagal klik '${filterText}' (attempt ${attempt}/${retries})`);
+            // Retry silently
             await page.waitForTimeout(600 * attempt);
         }
     }
@@ -109,10 +114,97 @@ async function clickFilter(page, filterText, store, { retries = 4 } = {}) {
     return false;
 }
 
+// ================== SCROLL AREA KATEGORI ==================
+async function scrollCategoryAreaUntilVisible(page, targetSelector, store, maxAttempts = 10) {
+    const categoryArea = page.locator(selectors.CONVERSATION_LIST_WRAPPER);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        // Cek apakah target sudah visible
+        const isVisible = await page.locator(targetSelector).isVisible().catch(() => false);
+        if (isVisible) {
+            return true;
+        }
+
+        // Scroll ke bawah di area kategori
+        await categoryArea.first().hover().catch(() => { });
+        await page.mouse.wheel(0, 150);
+        await page.waitForTimeout(300);
+    }
+
+    // Silent fail - kategori tidak ditemukan
+    return false;
+}
+
+// ================== EXPAND SEMUA PEMBELI (MULTI-LAYER) ==================
+async function expandSemuaPembeli(page, store) {
+    // Layer 0: Scroll sampai kategori visible
+    await scrollCategoryAreaUntilVisible(page, "#tab_all_buyers", store);
+
+    const tab = page.locator("#tab_all_buyers");
+
+    // Layer 1: VALIDASI - Pastikan text "Semua Pembeli" ada
+    const textSemuaPembeli = tab.locator("div:has-text('Semua Pembeli')");
+    if ((await textSemuaPembeli.count()) === 0) {
+        // Log error
+        logger.logRow(store, {
+            message: "Expand Semua Pembeli",
+            status: "ERROR ⚠",
+            statusColor: logger.colors.red
+        });
+        filterStatus.hadExpandError = true;
+        // Fallback ke klik by text
+        return await clickFilter(page, "Semua Pembeli", store, { retries: 2 });
+    }
+
+    // Layer 2: CEK COLLAPSED - Class oFMIfdCTic ada?
+    const iconCollapsed = tab.locator("i.oFMIfdCTic");
+    const isCollapsed = (await iconCollapsed.count()) > 0;
+
+    // Layer 3: KONFIRMASI EXPANDED - Child dropdown ada?
+    const dropdown = tab.locator(".shopee-react-dropdown");
+    const hasDropdown = (await dropdown.count()) > 0;
+
+    // Logika keputusan
+    if (!isCollapsed && hasDropdown) {
+        // Jika pernah error dan sekarang sukses, log recovery
+        if (filterStatus.hadExpandError) {
+            logger.logRow(store, {
+                message: "Expand Semua Pembeli",
+                status: "SUKSES ✓",
+                statusColor: logger.colors.green
+            });
+            filterStatus.hadExpandError = false;
+        }
+        return true;  // Sudah expanded
+    }
+
+    // Jika collapsed atau tidak ada dropdown, klik untuk expand
+    await safeClick(tab);
+
+    // Jika pernah error dan sekarang sukses expand, log recovery
+    if (filterStatus.hadExpandError) {
+        logger.logRow(store, {
+            message: "Expand Semua Pembeli",
+            status: "SUKSES ✓",
+            statusColor: logger.colors.green
+        });
+        filterStatus.hadExpandError = false;
+    }
+    return true;
+}
+
 async function ensureFilters(page, store) {
-    logger.logInfo(store, "Re-assert filter: Semua Chat + Semua Pembeli");
     await clickFilter(page, "Semua Chat", store, { retries: 3 });
-    await clickFilter(page, "Semua Pembeli", store, { retries: 3 });
+    await expandSemuaPembeli(page, store);
+
+    // Log hanya sekali saat pertama kali
+    if (!filterStatus.semuaChatClicked) {
+        logger.logRow(store, {
+            status: "FILTER ✓",
+            statusColor: logger.colors.cyan
+        });
+        filterStatus.semuaChatClicked = true;
+    }
 }
 
 // ================== CHAT TITLE ==================
@@ -162,32 +254,25 @@ async function scrollListToTop(page, store) {
 
 // ================== UNREAD DETECTION ==================
 async function rowHasUnreadBubble(row) {
-    const candidates = row
-        .locator("span:visible, div:visible")
-        .filter({ hasText: /^\s*\d+\s*$/ });
+    // Layer 1: Cek container bubble
+    const bubbleContainer = row.locator("div.qOuhYMblK-");
+    if ((await bubbleContainer.count()) === 0) return false;
 
-    const n = await candidates.count();
-    if (n === 0) return false;
+    // Layer 2: Cek child badge (bubble merah)
+    const unreadBadge = bubbleContainer.locator("div._3s0_a8dpo1");
+    if ((await unreadBadge.count()) === 0) return false;
 
-    const limit = Math.min(n, 3);
-    for (let i = 0; i < limit; i++) {
-        const el = candidates.nth(i);
-        try {
-            const box = await el.boundingBox();
-            if (!box) continue;
-            const smallEnough = box.width <= 50 && box.height <= 50;
-            const notTooTiny = box.width >= 8 && box.height >= 8;
-            if (smallEnough && notTooTiny) return true;
-        } catch {
-            // Continue
-        }
-    }
-    return false;
+    // Layer 3: Cek ada angka
+    const text = await unreadBadge.textContent().catch(() => "");
+    if (!/^\d+$/.test(text?.trim() || "")) return false;
+
+    return true;
 }
 
 async function scanUnreadOnce(page, store) {
     const rows = page.locator(selectors.CONVERSATION_CELL);
     const rowCount = await rows.count();
+
     if (rowCount === 0) return null;
 
     for (let i = 0; i < rowCount; i++) {
@@ -196,6 +281,7 @@ async function scanUnreadOnce(page, store) {
             return row;
         }
     }
+
     return null;
 }
 
@@ -242,7 +328,9 @@ async function setWindowTitle(page, title) {
 async function runStore(store) {
     const browserDataPath = utils.getBrowserDataPath(store.folder);
 
-    logger.logInfo(store, `Starting browser...`);
+    logger.logRow(store, {
+        message: "Starting browser..."
+    });
 
     const context = await chromium.launchPersistentContext(browserDataPath, {
         headless: config.HEADLESS,
@@ -341,7 +429,18 @@ async function runStore(store) {
                 const chatId = await takeChatTitle(unreadRow);
 
                 if (hist.set.has(chatId)) {
-                    logger.log(store, chatId, null, "already replied", "skip");
+                    // SKIP - tidak klik, biarkan bubble tetap ada
+                    // Log hanya sekali per buyer
+                    if (!skipLoggedSet.has(chatId)) {
+                        logger.logRow(store, {
+                            username: chatId,
+                            status: "SKIP",
+                            statusColor: logger.colors.gray
+                        });
+                        skipLoggedSet.add(chatId);
+                    }
+                    await page.waitForTimeout(200);
+                    continue;
                 } else {
                     await safeClick(unreadRow);
 
@@ -358,7 +457,14 @@ async function runStore(store) {
 
                     await sendReply(page);
 
-                    logger.log(store, chatId, lastMessage.trim(), "reply sent", "success");
+                    // Log dengan format kolom
+                    const msgPreview = lastMessage.trim().slice(0, 20) || "-";
+                    logger.logRow(store, {
+                        username: chatId,
+                        message: msgPreview,
+                        status: "REPLY ✓",
+                        statusColor: logger.colors.green
+                    });
                     hist.set.add(chatId);
                     utils.saveHistory(store.id, hist);
                 }
