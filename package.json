@@ -1,0 +1,21 @@
+{
+  "name": "shopee-auto-reply",
+  "version": "3.0.0",
+  "description": "Shopee Seller Chat Auto-Reply Bot",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "shopee",
+    "auto-reply",
+    "bot"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "playwright": "^1.57.0"
+  }
+}
